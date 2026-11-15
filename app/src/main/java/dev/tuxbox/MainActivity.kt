@@ -8,23 +8,30 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
@@ -33,19 +40,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,11 +56,20 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -76,21 +86,30 @@ class MainActivity : ComponentActivity() {
             if (!p.contains("screenIdleTimeout")) p.edit().putString("screenIdleTimeout", "never").apply()
             // Back button shows/hides the key bar at the bottom of the X11 desktop.
             if (!p.contains("backButtonAction")) p.edit().putString("backButtonAction", "toggle additional key bar").apply()
+            // Tap where your finger is (not trackpad-style); drag = mouse drag.
+            if (!p.contains("touchMode")) p.edit().putString("touchMode", "2").apply()
         }
-        setContent { AppTheme { Surface(Modifier.fillMaxSize()) { Home() } } }
+        setContent { LauncherTheme { Launcher() } }
     }
 }
 
+// ----------------------------------------------------------------- theme
+
+private val Ink = Color(0xFF0B0D10)
+private val Panel = Color(0xCC161A20)
+private val PanelHi = Color(0xFF232933)
+private val TextDim = Color(0xFF9AA3AE)
+private val Accent = Color(0xFF8AB4F8)
+
 @Composable
-fun AppTheme(content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
-    val ctx = LocalContext.current
-    val scheme = when {
-        Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-        dark -> darkColorScheme()
-        else -> lightColorScheme()
-    }
-    MaterialTheme(colorScheme = scheme, content = content)
+fun LauncherTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            primary = Accent, onPrimary = Ink, surface = Color(0xFF161A20), background = Ink,
+            surfaceVariant = PanelHi, onSurface = Color(0xFFE8EAED), onSurfaceVariant = TextDim,
+        ),
+        content = content,
+    )
 }
 
 private fun defaultResolution(ctx: Context): Pair<Int, Int> {
@@ -105,9 +124,12 @@ private fun defaultResolution(ctx: Context): Pair<Int, Int> {
     return w to h
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+private enum class Dialog { NONE, DISTRO, DISPLAY, GPU, RESOLUTION, ENV, LOG, COMMAND, RESET, CONTROLLER }
+
+// ----------------------------------------------------------------- launcher
+
 @Composable
-fun Home() {
+fun Launcher() {
     val ctx = LocalContext.current
     val prefs = remember { ctx.getSharedPreferences("tuxbox", Context.MODE_PRIVATE) }
     val env = remember { LinuxEnv(ctx) }
@@ -128,9 +150,8 @@ fun Home() {
         mutableStateOf(prefs.getString("gpu", if (MesaDrivers.adrenoSupported()) "freedreno" else "virgl")!!)
     }
     var extraEnv by rememberSaveable { mutableStateOf(prefs.getString("env", "")!!) }
-    var showAdvanced by rememberSaveable { mutableStateOf(false) }
-    var confirmReset by remember { mutableStateOf(false) }
     var command by rememberSaveable { mutableStateOf("") }
+    var dialog by remember { mutableStateOf(Dialog.NONE) }
 
     val distro = Catalog.distro(distroId)
     val desktop = Catalog.desktop(desktopId)
@@ -161,270 +182,454 @@ fun Home() {
         else ctx.startActivity(Intent(ctx, DesktopActivity::class.java))
     }
 
-    Column(
-        Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
-    ) {
-        Text("TuxBox", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        Text(
-            "Run a full Linux desktop on Android — no root needed.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        StatusCard(state, onOpen = ::openDesktop, onStop = SessionManager::stop)
-
-        Section("1 · Distribution")
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Catalog.distros.forEach { d ->
-                FilterChip(
-                    selected = d.id == distroId,
-                    onClick = { distroId = d.id; save() },
-                    enabled = idle,
-                    label = { Text(d.name) },
-                )
-            }
-        }
-        Text(
-            distro.blurb + "  " + if (rootfsReady) "Installed · ${installed.size} desktop(s)."
-            else "Not installed yet; it downloads on first install.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
-        Section("2 · Desktop environment")
-        Catalog.desktops.forEach { de ->
-            DesktopCard(
-                de = de,
-                selected = de.id == desktopId,
-                installed = de.id in installed,
-                supported = de.supports(distro),
-                enabled = idle,
-                onClick = { desktopId = de.id; save() },
-            )
-        }
-
-        Section("3 · Resolution")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                resW, { resW = it.filter(Char::isDigit).take(4); save() },
-                label = { Text("Width") }, singleLine = true, modifier = Modifier.width(110.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            )
-            Text("×")
-            OutlinedTextField(
-                resH, { resH = it.filter(Char::isDigit).take(4); save() },
-                label = { Text("Height") }, singleLine = true, modifier = Modifier.width(110.dp),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            )
-            TextButton(onClick = { resW = "$dw"; resH = "$dh"; save() }) { Text("Auto") }
-        }
-
-        Section("4 · Display & GPU")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            DisplayMode.entries.forEach { m ->
-                FilterChip(
-                    selected = display == m,
-                    onClick = { displayId = m.id; save() },
-                    enabled = idle,
-                    label = { Text(m.label) },
-                )
-            }
-        }
-        Hint(
-            when {
-                desktop.wayland -> "${desktop.name} is Wayland-only, so it always uses VNC."
-                display == DisplayMode.TERMUX_X11 -> "Built-in X server (from Termux:X11): GPU acceleration, blur and animations. " +
-                    "Controller: left stick = mouse, A/B = click, right stick = scroll, L1 = Super, Start = keyboard."
-                else -> "Works everywhere; GPU only through VirGL. Same controller support."
-            },
-        )
-
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            GpuMode.entries.forEach { m ->
-                FilterChip(
-                    selected = gpu == m,
-                    onClick = { gpuId = m.id; save() },
-                    enabled = idle && when {
-                        m.adrenoOnly -> gpuCapable
-                        m == GpuMode.VIRGL -> virgl
-                        else -> true
-                    },
-                    label = { Text(m.label) },
-                )
-            }
-        }
-        Hint(
-            (if (gpuCapable) "GPU: ${adreno ?: "Adreno"}" else "No Adreno GPU: VirGL is the fast option here") +
-                " · ${gpu.help}",
-        )
-        if (gpuCapable && rootfsReady) {
-            OutlinedButton(onClick = { SessionManager.installGpu(ctx, distro) }, enabled = idle) {
-                Text(if (gpuInstalled) "Reinstall GPU drivers" else "Install GPU drivers (~12 MB)")
-            }
-            if (!gpuInstalled && gpu.adrenoOnly) Hint("GPU drivers aren't installed in ${distro.name} yet; it will run in software until you install them.")
-        }
-
-        TextButton(onClick = { showAdvanced = !showAdvanced }) {
-            Text(if (showAdvanced) "Hide advanced" else "Advanced: environment variables")
-        }
-        if (showAdvanced) {
-            OutlinedTextField(
-                extraEnv, { extraEnv = it; save() },
-                label = { Text("Extra env (KEY=value, one per line)") },
-                placeholder = { Text("MESA_GL_VERSION_OVERRIDE=4.6\nTU_DEBUG=noconform,sysmem") },
-                modifier = Modifier.fillMaxWidth(), minLines = 3,
-            )
-        }
-
-        val canInstall = idle && desktop.supports(distro)
-        val canStart = idle && desktop.id in installed
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = { SessionManager.install(ctx, distro, desktop) }, enabled = canInstall) {
-                Text(if (desktop.id in installed) "Update ${desktop.name}" else "Install ${desktop.name}")
-            }
-            Button(
-                onClick = {
-                    val w = (resW.toIntOrNull() ?: dw).coerceIn(640, 3840)
-                    val h = (resH.toIntOrNull() ?: dh).coerceIn(480, 2160)
-                    SessionManager.start(
-                        ctx, distro, desktop,
-                        SessionManager.Options(w, h, display, gpu, extraEnv),
-                    )
-                    openDesktop()
-                },
-                enabled = canStart,
-            ) { Text("Start") }
-        }
-        if (!desktop.supports(distro)) {
-            Text(
-                "${desktop.name} isn't available on ${distro.name}. ${desktop.note.orEmpty()}",
-                color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall,
-            )
-        }
-
-        Section("Log")
-        LogView(log)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                command, { command = it }, singleLine = true, modifier = Modifier.weight(1f),
-                label = { Text("Run command in ${distro.name.substringBefore(" ")}") },
-                enabled = idle && rootfsReady,
-            )
-            Button(
-                onClick = { SessionManager.shell(ctx, distro, command); command = "" },
-                enabled = idle && rootfsReady && command.isNotBlank(),
-            ) { Text("Run") }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = SessionManager::clearLog) { Text("Clear log") }
-            TextButton(onClick = { confirmReset = true }, enabled = idle && rootfsReady) {
-                Text("Remove ${distro.name.substringBefore(" ")}…", color = MaterialTheme.colorScheme.error)
-            }
-        }
-        Spacer(Modifier.height(24.dp))
+    fun start() {
+        val w = (resW.toIntOrNull() ?: dw).coerceIn(640, 3840)
+        val h = (resH.toIntOrNull() ?: dh).coerceIn(480, 2160)
+        SessionManager.start(ctx, distro, desktop, SessionManager.Options(w, h, display, gpu, extraEnv))
+        openDesktop()
     }
 
-    if (confirmReset) {
-        AlertDialog(
-            onDismissRequest = { confirmReset = false },
+    val primaryFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { runCatching { primaryFocus.requestFocus() } }
+
+    Box(Modifier.fillMaxSize().background(Ink)) {
+        // Backdrop: the selected desktop, big and dimmed (Daijishō-style box art).
+        Crossfade(targetState = desktopId, label = "backdrop") { id ->
+            DesktopPreview(id, Modifier.fillMaxSize().blur(40.dp))
+        }
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(0f to Color(0xB30B0D10), 0.45f to Color(0xE60B0D10), 0.7f to Ink)))
+
+        Column(
+            Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            // ------------------------------------------------ top bar
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("TuxBox", fontSize = 26.sp, fontWeight = FontWeight.Black, color = Color.White)
+                Spacer(Modifier.width(14.dp))
+                StatusPill(state)
+                Spacer(Modifier.weight(1f))
+                Chip(onClick = { dialog = Dialog.DISTRO }, enabled = idle) {
+                    DistroBadge(distro, 26.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(distro.name, color = Color.White, fontWeight = FontWeight.SemiBold)
+                    Text("  ▾", color = TextDim)
+                }
+            }
+
+            // ------------------------------------------------ hero
+            Row(horizontalArrangement = Arrangement.spacedBy(24.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(desktop.name, fontSize = 36.sp, fontWeight = FontWeight.Black, color = Color.White, lineHeight = 38.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Tag(desktop.size)
+                    if (desktop.id in installed) Tag("Installed", Accent)
+                    if (desktop.wayland) Tag("Wayland")
+                    if (!desktop.supports(distro)) Tag("Not on ${distro.name}", Color(0xFFE5484D))
+                }
+                Text(desktop.description, color = Color(0xFFD0D4DA), fontSize = 14.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                if (!desktop.supports(distro) && desktop.note != null) Text(desktop.note, color = Color(0xFFFF8A80), fontSize = 13.sp)
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val running = state is SessionState.Running
+                    val canStart = idle && desktop.id in installed
+                    val canInstall = idle && desktop.supports(distro)
+                    when {
+                        running -> {
+                            BigButton("▶  Open desktop", Modifier.focusRequester(primaryFocus)) { openDesktop() }
+                            BigButton("■  Stop", outlined = true) { SessionManager.stop() }
+                        }
+                        canStart -> {
+                            BigButton("▶  Start", Modifier.focusRequester(primaryFocus)) { start() }
+                            BigButton("Update", outlined = true, enabled = canInstall) { SessionManager.install(ctx, distro, desktop) }
+                        }
+                        else -> {
+                            BigButton("⬇  Install", Modifier.focusRequester(primaryFocus), enabled = canInstall) {
+                                SessionManager.install(ctx, distro, desktop)
+                            }
+                            if (state is SessionState.Busy) BigButton("■  Stop", outlined = true) { SessionManager.stop() }
+                        }
+                    }
+                }
+            }
+            // Box art: the selected desktop's look
+            Crossfade(targetState = desktopId, label = "art", modifier = Modifier.weight(0.9f)) { id ->
+                DesktopPreview(
+                    id,
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f).shadow(18.dp, RoundedCornerShape(16.dp))
+                        .clip(RoundedCornerShape(16.dp)).border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(16.dp)),
+                )
+            }
+            }
+
+            // ------------------------------------------------ row 1: desktops
+            RowTitle("Desktops", "${installed.size} installed on ${distro.name}")
+            val desktopsRow = rememberLazyListState(
+                initialFirstVisibleItemIndex = Catalog.desktops.indexOfFirst { it.id == desktopId }.coerceAtLeast(0),
+            )
+            LazyRow(state = desktopsRow, horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(vertical = 10.dp, horizontal = 4.dp)) {
+                items(Catalog.desktops, key = { it.id }) { de ->
+                    DesktopTile(
+                        de = de, selected = de.id == desktopId, installed = de.id in installed,
+                        supported = de.supports(distro),
+                        onFocus = { desktopId = de.id; save() },
+                        onClick = {
+                            if (de.id == desktopId && idle && de.id in installed) start()
+                            else { desktopId = de.id; save() }
+                        },
+                    )
+                }
+            }
+
+            // ------------------------------------------------ row 2: log
+            RowTitle("Log", when (state) {
+                SessionState.Idle -> "Idle"
+                is SessionState.Busy -> (state as SessionState.Busy).task
+                is SessionState.Running -> "Running"
+            })
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(vertical = 10.dp, horizontal = 4.dp)) {
+                item { LogTile(log) { dialog = Dialog.LOG } }
+                item {
+                    ActionTile("⌨", "Run command", "in ${distro.name}", enabled = idle && rootfsReady) { dialog = Dialog.COMMAND }
+                }
+                item { ActionTile("⌫", "Clear log", "${log.size} lines") { SessionManager.clearLog() } }
+            }
+
+            // ------------------------------------------------ row 3: settings
+            RowTitle("Settings", null)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(vertical = 10.dp, horizontal = 4.dp)) {
+                item {
+                    SettingTile("🐧", "Distribution", distro.name, enabled = idle, badge = { DistroBadge(distro, 30.dp) }) {
+                        dialog = Dialog.DISTRO
+                    }
+                }
+                item { SettingTile("🖥", "Display", display.label, enabled = idle) { dialog = Dialog.DISPLAY } }
+                item { SettingTile("⚡", "GPU", gpu.label, enabled = idle) { dialog = Dialog.GPU } }
+                item { SettingTile("⤢", "Resolution", "${resW}×$resH", enabled = idle) { dialog = Dialog.RESOLUTION } }
+                if (gpuCapable) item {
+                    SettingTile(
+                        "⬇", "GPU drivers",
+                        when { !rootfsReady -> "Install a desktop first"; gpuInstalled -> "Installed · tap to update"; else -> "Not installed" },
+                        enabled = idle && rootfsReady,
+                    ) { SessionManager.installGpu(ctx, distro) }
+                }
+                item { SettingTile("🎮", "Controller", "Button map") { dialog = Dialog.CONTROLLER } }
+                item {
+                    SettingTile("⚙", "Environment", if (extraEnv.isBlank()) "None" else "${extraEnv.lines().count { it.isNotBlank() }} set",
+                        enabled = idle) { dialog = Dialog.ENV }
+                }
+                item {
+                    SettingTile("🗑", "Remove distro", if (rootfsReady) distro.name else "Not installed",
+                        enabled = idle && rootfsReady, danger = true) { dialog = Dialog.RESET }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    // ---------------------------------------------------- dialogs
+    val close = { dialog = Dialog.NONE }
+    when (dialog) {
+        Dialog.DISTRO -> PickerDialog(
+            "Distribution", close,
+            Catalog.distros.map { d ->
+                PickerOption(d.id, d.name, d.blurb + if (env.isRootfsInstalled(d)) "  · Installed" else "", leading = { DistroBadge(d, 34.dp) })
+            },
+            selected = distroId,
+        ) { distroId = it; save(); close() }
+
+        Dialog.DISPLAY -> PickerDialog(
+            "Display", close,
+            listOf(
+                PickerOption(DisplayMode.TERMUX_X11.id, DisplayMode.TERMUX_X11.label,
+                    "Built-in X server. Real GPU acceleration (Freedreno/Zink), blur and animations. Recommended."),
+                PickerOption(DisplayMode.VNC.id, DisplayMode.VNC.label,
+                    "Works everywhere and with Wayland desktops. GPU only through VirGL."),
+            ),
+            selected = displayId,
+        ) { displayId = it; save(); close() }
+
+        Dialog.GPU -> PickerDialog(
+            "GPU" + (adreno?.let { " · $it" } ?: ""), close,
+            GpuMode.entries.map { m ->
+                PickerOption(m.id, m.label, m.help, enabled = when {
+                    m.adrenoOnly -> gpuCapable
+                    m == GpuMode.VIRGL -> virgl
+                    else -> true
+                })
+            },
+            selected = gpu.id,
+        ) { gpuId = it; save(); close() }
+
+        Dialog.RESOLUTION -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Resolution (VNC)") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("The X11 display always matches your screen; this is used by VNC.", color = TextDim, fontSize = 13.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(resW, { resW = it.filter(Char::isDigit).take(4) }, label = { Text("Width") },
+                            singleLine = true, modifier = Modifier.width(110.dp),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                        Text("×")
+                        OutlinedTextField(resH, { resH = it.filter(Char::isDigit).take(4) }, label = { Text("Height") },
+                            singleLine = true, modifier = Modifier.width(110.dp),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { save(); close() }) { Text("Save") } },
+            dismissButton = { TextButton(onClick = { resW = "$dw"; resH = "$dh"; save(); close() }) { Text("Auto") } },
+        )
+
+        Dialog.ENV -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Environment variables") },
+            text = {
+                OutlinedTextField(
+                    extraEnv, { extraEnv = it }, modifier = Modifier.fillMaxWidth(), minLines = 4,
+                    label = { Text("KEY=value, one per line") },
+                    placeholder = { Text("MESA_GL_VERSION_OVERRIDE=4.6\nTU_DEBUG=noconform,sysmem") },
+                )
+            },
+            confirmButton = { TextButton(onClick = { save(); close() }) { Text("Save") } },
+        )
+
+        Dialog.LOG -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Log") },
+            text = { LogList(log, Modifier.fillMaxWidth().heightIn(min = 200.dp, max = 460.dp)) },
+            confirmButton = { TextButton(onClick = close) { Text("Close") } },
+            dismissButton = { TextButton(onClick = { SessionManager.clearLog() }) { Text("Clear") } },
+        )
+
+        Dialog.COMMAND -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Run command in ${distro.name}") },
+            text = {
+                OutlinedTextField(command, { command = it }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("apt install neofetch") })
+            },
+            confirmButton = {
+                TextButton(enabled = command.isNotBlank(), onClick = {
+                    SessionManager.shell(ctx, distro, command); command = ""; dialog = Dialog.LOG
+                }) { Text("Run") }
+            },
+            dismissButton = { TextButton(onClick = close) { Text("Cancel") } },
+        )
+
+        Dialog.RESET -> AlertDialog(
+            onDismissRequest = close,
             title = { Text("Remove ${distro.name}?") },
             text = { Text("This deletes the whole Linux system and every desktop installed in it. Files in /root/android are kept.") },
-            confirmButton = {
-                TextButton(onClick = { confirmReset = false; SessionManager.reset(ctx, distro) }) { Text("Remove") }
+            confirmButton = { TextButton(onClick = { close(); SessionManager.reset(ctx, distro) }) { Text("Remove", color = Color(0xFFFF6B6B)) } },
+            dismissButton = { TextButton(onClick = close) { Text("Cancel") } },
+        )
+
+        Dialog.CONTROLLER -> AlertDialog(
+            onDismissRequest = close,
+            title = { Text("Controller") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        "Left stick" to "Mouse", "Right stick" to "Scroll", "D-pad" to "Arrow keys",
+                        "A" to "Left click (hold to drag)", "B" to "Right click", "L3" to "Middle click",
+                        "X" to "Enter", "Y" to "Backspace", "Select" to "Esc", "Start" to "On-screen keyboard",
+                        "L1 (hold)" to "Super — e.g. L1+Q terminal, L1+R apps", "R1 (hold)" to "Alt",
+                        "L2 (hold)" to "Ctrl", "R2" to "Tab", "R3" to "Show/hide key bar",
+                    ).forEach { (k, v) ->
+                        Row {
+                            Text(k, Modifier.width(110.dp), fontWeight = FontWeight.Bold, color = Accent)
+                            Text(v)
+                        }
+                    }
+                }
             },
-            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Cancel") } },
+            confirmButton = { TextButton(onClick = close) { Text("OK") } },
+        )
+
+        Dialog.NONE -> Unit
+    }
+}
+
+// ----------------------------------------------------------------- pieces
+
+/** Scales up and outlines when focused with a D-pad/controller, like a console launcher. */
+@Composable
+private fun Modifier.focusGlow(shape: RoundedCornerShape, selected: Boolean = false, onFocus: () -> Unit = {}): Modifier {
+    var focused by remember { mutableStateOf(false) }
+    val s by animateFloatAsState(if (focused) 1.06f else 1f, label = "focus")
+    return this
+        .scale(s)
+        .onFocusChanged { if (it.isFocused && !focused) onFocus(); focused = it.isFocused }
+        .border(
+            when {
+                focused -> BorderStroke(3.dp, Color.White)
+                selected -> BorderStroke(2.dp, Accent)
+                else -> BorderStroke(1.dp, Color(0x22FFFFFF))
+            },
+            shape,
+        )
+}
+
+@Composable
+private fun DesktopTile(de: Desktop, selected: Boolean, installed: Boolean, supported: Boolean, onFocus: () -> Unit, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(Modifier.width(200.dp)) {
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                .focusGlow(shape, selected, onFocus).clip(shape)
+                .clickable(onClick = onClick),
+        ) {
+            DesktopPreview(de.id, Modifier.fillMaxSize())
+            if (!supported) Box(Modifier.fillMaxSize().background(Color(0xAA000000)))
+            Row(Modifier.align(Alignment.TopEnd).padding(6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (installed) Tag("✓", Accent)
+                if (de.wayland) Tag("W")
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(de.name, color = if (supported) Color.White else TextDim, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Text(
+            if (installed) "Installed" else if (supported) de.size else "Not available",
+            color = TextDim, fontSize = 12.sp,
         )
     }
 }
 
-
 @Composable
-private fun Hint(text: String) {
-    Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-}
-
-@Composable
-private fun Section(title: String) {
-    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.padding(top = 6.dp))
-}
-
-@Composable
-private fun StatusCard(state: SessionState, onOpen: () -> Unit, onStop: () -> Unit) {
-    val (title, color) = when (state) {
-        SessionState.Idle -> "Idle" to MaterialTheme.colorScheme.surfaceVariant
-        is SessionState.Busy -> state.task to MaterialTheme.colorScheme.tertiaryContainer
-        is SessionState.Running -> "${state.desktop.name} running on ${state.distro.name}" to
-            MaterialTheme.colorScheme.primaryContainer
-    }
-    Card(colors = CardDefaults.cardColors(containerColor = color), modifier = Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, Modifier.weight(1f), fontWeight = FontWeight.Medium)
-            if (state is SessionState.Running) TextButton(onClick = onOpen) { Text("Open") }
-            if (state != SessionState.Idle) TextButton(onClick = onStop) { Text("Stop") }
-        }
-    }
-}
-
-@Composable
-private fun DesktopCard(
-    de: Desktop, selected: Boolean, installed: Boolean, supported: Boolean, enabled: Boolean, onClick: () -> Unit,
-) {
-    val border = if (selected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(enabled = enabled, onClick = onClick),
-        border = border,
-        colors = CardDefaults.cardColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.secondaryContainer
-            else MaterialTheme.colorScheme.surfaceContainer,
-        ),
+private fun LogTile(lines: List<String>, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier.width(520.dp).height(130.dp).focusGlow(shape).clip(shape)
+            .background(Color(0xE6101418)).clickable(onClick = onClick).padding(14.dp),
     ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(de.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f),
-                    color = if (supported) Color.Unspecified else MaterialTheme.colorScheme.outline)
-                if (installed) Tag("Installed")
-                if (de.wayland) Tag("Wayland")
-                Text(de.size, style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp))
-            }
-            Text(de.description, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            if (selected && de.note != null) {
-                Text(de.note, style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.tertiary, modifier = Modifier.padding(top = 4.dp))
-            }
+        val tail = lines.takeLast(5)
+        if (tail.isEmpty()) Text("Nothing yet. Pick a desktop and press Install.", color = TextDim, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        tail.forEach {
+            Text(it, color = Color(0xFFD6DEE6), fontFamily = FontFamily.Monospace, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
 
 @Composable
-private fun Tag(text: String) {
+private fun LogList(lines: List<String>, modifier: Modifier) {
+    val st = rememberLazyListState()
+    LaunchedEffect(lines.size) { if (lines.isNotEmpty()) st.scrollToItem(lines.lastIndex) }
+    LazyColumn(modifier.background(Color(0xFF101418), RoundedCornerShape(8.dp)).padding(8.dp), state = st) {
+        items(lines) { Text(it, color = Color(0xFFD6DEE6), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp) }
+    }
+}
+
+@Composable
+private fun ActionTile(icon: String, title: String, subtitle: String, enabled: Boolean = true, onClick: () -> Unit) =
+    SettingTile(icon, title, subtitle, enabled = enabled, onClick = onClick)
+
+@Composable
+private fun SettingTile(
+    icon: String, title: String, value: String, enabled: Boolean = true, danger: Boolean = false,
+    badge: (@Composable () -> Unit)? = null, onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier.width(160.dp).height(130.dp).focusGlow(shape).clip(shape)
+            .background(if (enabled) Panel else Color(0x66161A20))
+            .clickable(enabled = enabled, onClick = onClick).padding(14.dp),
+        verticalArrangement = Arrangement.SpaceBetween,
+    ) {
+        if (badge != null) badge() else Text(icon, fontSize = 28.sp)
+        Column {
+            Text(title, color = if (danger) Color(0xFFFF8A80) else Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            Text(value, color = TextDim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun RowTitle(title: String, subtitle: String?) {
+    Row(verticalAlignment = Alignment.Bottom) {
+        Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+        if (subtitle != null) Text("   $subtitle", color = TextDim, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun StatusPill(state: SessionState) {
+    val (label, color) = when (state) {
+        SessionState.Idle -> "Idle" to Color(0xFF5F6B7A)
+        is SessionState.Busy -> "Working…" to Color(0xFFE8A33D)
+        is SessionState.Running -> "${state.desktop.name} running" to Color(0xFF3FB950)
+    }
+    Row(
+        Modifier.background(Color(0x99000000), RoundedCornerShape(50)).padding(horizontal = 12.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(8.dp).background(color, RoundedCornerShape(50)))
+        Spacer(Modifier.width(7.dp))
+        Text(label, color = Color.White, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun Tag(text: String, color: Color = Color(0xFF5F6B7A)) {
     Text(
-        text, fontSize = 10.sp, fontWeight = FontWeight.Medium,
-        color = MaterialTheme.colorScheme.onPrimary,
-        modifier = Modifier.padding(start = 4.dp)
-            .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
-            .padding(horizontal = 5.dp, vertical = 1.dp),
+        text, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold,
+        modifier = Modifier.background(color.copy(alpha = 0.85f), RoundedCornerShape(6.dp)).padding(horizontal = 7.dp, vertical = 2.dp),
     )
 }
 
 @Composable
-private fun LogView(lines: List<String>) {
-    val listState = rememberLazyListState()
-    LaunchedEffect(lines.size) { if (lines.isNotEmpty()) listState.scrollToItem(lines.lastIndex) }
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxWidth().height(260.dp)
-            .background(Color(0xFF101214), RoundedCornerShape(8.dp)).padding(8.dp),
-    ) {
-        if (lines.isEmpty()) item {
-            Text("Nothing yet. Pick a distro and desktop, then tap Install.",
-                color = Color(0xFF8A9199), fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-        }
-        items(lines) {
-            Text(it, color = Color(0xFFD6DEE6), fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp)
-        }
+private fun Chip(onClick: () -> Unit, enabled: Boolean, content: @Composable () -> Unit) {
+    val shape = RoundedCornerShape(50)
+    Row(
+        Modifier.focusGlow(shape).clip(shape).background(Color(0x99000000))
+            .clickable(enabled = enabled, onClick = onClick).padding(start = 6.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) { content() }
+}
+
+@Composable
+private fun BigButton(text: String, modifier: Modifier = Modifier, outlined: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(12.dp)
+    val m = modifier.focusGlow(shape).height(52.dp)
+    if (outlined) OutlinedButton(onClick, m, enabled = enabled, shape = shape) { Text(text, fontSize = 16.sp, color = Color.White) }
+    else Button(onClick, m, enabled = enabled, shape = shape,
+        colors = ButtonDefaults.buttonColors(containerColor = Color.White, contentColor = Ink)) {
+        Text(text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
     }
+}
+
+private data class PickerOption(
+    val id: String, val label: String, val description: String, val enabled: Boolean = true,
+    val leading: (@Composable () -> Unit)? = null,
+)
+
+@Composable
+private fun PickerDialog(title: String, onDismiss: () -> Unit, options: List<PickerOption>, selected: String, onPick: (String) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.heightIn(max = 460.dp)) {
+                items(options) { o ->
+                    val shape = RoundedCornerShape(12.dp)
+                    Row(
+                        Modifier.fillMaxWidth().focusGlow(shape, o.id == selected).clip(shape)
+                            .background(if (o.id == selected) PanelHi else Color(0xFF1B2028))
+                            .clickable(enabled = o.enabled) { onPick(o.id) }.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        o.leading?.let { it(); Spacer(Modifier.width(12.dp)) }
+                        Column(Modifier.weight(1f)) {
+                            Text(o.label, fontWeight = FontWeight.Bold, color = if (o.enabled) Color.White else TextDim)
+                            Text(o.description, fontSize = 12.sp, color = TextDim)
+                        }
+                        if (o.id == selected) Text("✓", color = Accent, fontSize = 18.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }

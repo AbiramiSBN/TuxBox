@@ -1,0 +1,31 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TuxBox</title><meta name="description" content="Run full Linux desktops on Android without root.">
+<style>
+:root{--bg:#0b0d10;--panel:#161a20;--fg:#e8eaed;--dim:#9aa3ae;--acc:#8ab4f8}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,sans-serif}
+.wrap{max-width:1040px;margin:auto;padding:0 16px}header{padding:56px 0 24px}
+h1{font-size:clamp(40px,8vw,64px);margin:0;font-weight:900}p.lead{color:var(--dim);font-size:19px;max-width:640px}
+.btn{display:inline-block;background:#fff;color:#0b0d10;padding:14px 26px;border-radius:12px;font-weight:700;text-decoration:none;margin:8px 8px 0 0}
+.btn.o{background:none;color:#fff;border:1px solid #fff4}img{width:100%;border-radius:14px;border:1px solid #fff2;margin:16px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:24px 0}
+.card{background:var(--panel);border-radius:14px;padding:18px}.card b{color:#fff}h2{margin-top:48px}
+ol li{margin:6px 0}code{background:#222833;padding:2px 6px;border-radius:6px}footer{color:var(--dim);padding:48px 0;font-size:14px}
+</style></head><body><div class="wrap">
+<header><h1>TuxBox</h1><p class="lead">Full Linux desktops on Android — no root. Pick a distro and a desktop, tap Start. Built-in X server with real Adreno GPU acceleration and controller support.</p>
+<a class="btn" href="https://github.com/AbiramiSBN/TuxBox/releases/latest/download/TuxBox.apk">⬇ Download APK</a>
+<a class="btn o" href="https://github.com/AbiramiSBN/TuxBox">Source on GitHub</a></header>
+<img src="img/launcher.jpg" alt="TuxBox launcher"><img src="img/desktop.jpg" alt="Hypr-style desktop running on a Retroid Pocket 5">
+<div class="grid">
+<div class="card"><b>9 distros</b><br>Debian, Ubuntu, Kali, Devuan, Arch, Fedora, openSUSE, Alpine, Void.</div>
+<div class="card"><b>10 desktops</b><br>XFCE, LXDE, LXQt, MATE, Cinnamon, KDE, GNOME, i3, Sway and Hypr-style.</div>
+<div class="card"><b>Real GPU</b><br>Freedreno / Zink / Turnip on Adreno; VirGL on any other GPU.</div>
+<div class="card"><b>Controller ready</b><br>Stick = mouse, A/B = click, L1 = Super. Works on handhelds and Android TV.</div>
+</div>
+<h2>Install</h2><ol>
+<li>Download <code>TuxBox.apk</code> above and open it (allow “install unknown apps” if asked).</li>
+<li>Open TuxBox, choose a distro (Debian 13 recommended) and a desktop, press <b>Install</b> (10–30 min).</li>
+<li>Adreno phones: press <b>GPU drivers</b> in Settings, then set Display = X11 + GPU, GPU = Freedreno.</li>
+<li>Press <b>Start</b>. Back button hides/shows the key bar.</li></ol>
+<p style="color:var(--dim)">Android 8+, ARM64 or ARMv7. Android 12+: enable Developer options → “Disable child process restrictions” for heavy desktops.</p>
+<footer>GPL-3.0. Includes Termux:X11 (GPL-3.0), proot and virglrenderer from Termux packages, Mesa builds from lfdevs/mesa-for-android-container.</footer>
+</div></body></html>
