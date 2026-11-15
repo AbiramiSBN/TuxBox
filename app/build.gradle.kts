@@ -12,17 +12,29 @@ android {
         applicationId = "dev.tuxbox"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // CI passes -PtuxboxVersionName=1.2.3 -PtuxboxVersionCode=N for tagged releases.
+        versionCode = (project.findProperty("tuxboxVersionCode") as String?)?.toInt() ?: 1
+        versionName = (project.findProperty("tuxboxVersionName") as String?) ?: "0.1.0"
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+    }
+
+    signingConfigs {
+        // Releases must keep the same key so in-app updates install over the existing app.
+        // CI provides it via secrets; locally the default debug keystore is the same key.
+        create("release") {
+            fun env(k: String) = System.getenv(k)?.takeUnless { it.isBlank() }
+            storeFile = env("TUXBOX_KEYSTORE")?.let { file(it) }
+                ?: file(System.getProperty("user.home") + "/.android/debug.keystore")
+            storePassword = env("TUXBOX_KEYSTORE_PASSWORD") ?: "android"
+            keyAlias = env("TUXBOX_KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword = env("TUXBOX_KEY_PASSWORD") ?: "android"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so the release APK is installable out of the box.
-            // Replace with your own signing config before distributing.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
@@ -30,7 +42,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures { compose = true; buildConfig = true }
 
     // proot is shipped as lib*.so so Android extracts it to nativeLibraryDir,
     // the only app location where exec() is allowed on Android 10+.

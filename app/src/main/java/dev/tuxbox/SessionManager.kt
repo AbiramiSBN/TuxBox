@@ -77,6 +77,7 @@ object SessionManager {
                 log("ERROR: ${e.message ?: e.javaClass.simpleName}")
             } finally {
                 killAllLinux()
+                sessionDisplay = null
                 process = null
                 logFile?.close(); logFile = null
                 _state.value = SessionState.Idle
@@ -151,6 +152,8 @@ object SessionManager {
                 log("Starting X server...")
                 helper(env.x11Server(distro), "x11")
             }
+            sessionDisplay = if (display == DisplayMode.TERMUX_X11) ":0" else ":1"
+            watchLaunchRequests(app = ctx.applicationContext, distro = distro)
             log("Starting ${desktop.name} at ${o.width}x${o.height}...")
             val sessionEnv = mapOf("TUXBOX_DISPLAY" to display.id, "TUXBOX_GPU" to gpu.id) + parseEnv(o.extraEnv)
             val code = run(env.prootProcess(
@@ -158,6 +161,76 @@ object SessionManager {
             ))
             log("Session exited (code $code).")
         }
+
+    // --------------------------------------------------------------- Flatpak
+
+    /** Display of the running desktop (":0" built-in X11, ":1" VNC), or null. */
+    @Volatile private var sessionDisplay: String? = null
+    private val _flatpakJob = MutableStateFlow<String?>(null)
+    /** Label of the Flatpak install/remove that's running, or null. Independent of the desktop session. */
+    val flatpakJob: StateFlow<String?> = _flatpakJob
+
+    /**
+     * Installs/removes/updates Flatpak apps. Runs alongside a running desktop (its own proot
+     * process), but not during distro installs, which hold the package manager.
+     */
+    fun flatpak(ctx: Context, distro: Distro, cmd: String, appId: String = "", label: String) {
+        val app = ctx.applicationContext
+        if (_flatpakJob.value != null) { log("Wait for \"${_flatpakJob.value}\" to finish."); return }
+        if (_state.value is SessionState.Busy) { log("Wait for the current task to finish first."); return }
+        _flatpakJob.value = label
+        scope.launch {
+            try {
+                val env = LinuxEnv(app)
+                checkProot(env)
+                check(env.isRootfsInstalled(distro)) { "Install a desktop on ${distro.name} first." }
+                bootstrap(env, distro)
+                log("$label...")
+                val p = env.prootProcess(distro, "/bin/bash", "/opt/tuxbox/flatpak.sh", distro.family.id, cmd, appId).start()
+                p.inputStream.bufferedReader().useLines { seq -> seq.forEach { log(it) } }
+                val code = p.waitFor()
+                log(if (code == 0) "✔ $label done." else "✘ $label failed (exit $code).")
+            } catch (e: Exception) {
+                log("ERROR: ${e.message ?: e.javaClass.simpleName}")
+            } finally {
+                _flatpakJob.value = null
+                revision.value++
+            }
+        }
+    }
+
+    /** Launches an installed Flatpak app on the running desktop. Returns false if no desktop is running. */
+    fun launchFlatpak(ctx: Context, distro: Distro, appId: String): Boolean {
+        val display = sessionDisplay
+        if (_state.value !is SessionState.Running || display == null) {
+            log("Start a desktop first, then launch $appId.")
+            return false
+        }
+        scope.launch {
+            try {
+                log("Launching $appId...")
+                helper(LinuxEnv(ctx.applicationContext).flatpakAppProcess(distro, appId, display), appId.substringAfterLast('.'))
+            } catch (e: Exception) {
+                log("ERROR launching $appId: ${e.message}")
+            }
+        }
+        return true
+    }
+
+    /** App menus inside the desktop call `flatpak run X`, which drops a request file in /tmp. */
+    private fun watchLaunchRequests(app: Context, distro: Distro) {
+        val dir = File(LinuxEnv(app).rootfs(distro), "tmp/.tuxbox-launch").apply { mkdirs() }
+        Thread {
+            while (_state.value is SessionState.Running) {
+                dir.listFiles()?.sortedBy { it.name }?.forEach { f ->
+                    val id = runCatching { f.readText().trim() }.getOrNull()
+                    f.delete()
+                    if (!id.isNullOrEmpty()) launchFlatpak(app, distro, id)
+                }
+                Thread.sleep(700)
+            }
+        }.apply { isDaemon = true }.start()
+    }
 
     fun installGpu(ctx: Context, distro: Distro) =
         launch(ctx, SessionState.Busy("Installing GPU drivers on ${distro.name}")) { env ->

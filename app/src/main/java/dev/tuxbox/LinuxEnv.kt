@@ -228,7 +228,10 @@ class LinuxEnv(private val ctx: Context) {
     }
 
     /** Builds a ProcessBuilder running [command] inside the distro via proot. */
-    fun prootProcess(d: Distro, vararg command: String, env: Map<String, String> = emptyMap()): ProcessBuilder {
+    fun prootProcess(
+        d: Distro, vararg command: String, env: Map<String, String> = emptyMap(),
+        extraBinds: List<String> = emptyList(), baseEnv: List<String>? = null,
+    ): ProcessBuilder {
         val root = rootfs(d)
         syncScripts(root)
         tmpDir.mkdirs()
@@ -259,8 +262,9 @@ class LinuxEnv(private val ctx: Context) {
             "--cwd=/root",
         )
         args += prepareFakeProc()
-        args += listOf(
-            "/usr/bin/env", "-i",
+        args += extraBinds.map { "--bind=$it" }
+        args += listOf("/usr/bin/env", "-i")
+        args += baseEnv ?: listOf(
             "HOME=/root", "USER=root", "TERM=xterm-256color", "LANG=C.UTF-8", "TMPDIR=/tmp",
             "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
@@ -279,6 +283,99 @@ class LinuxEnv(private val ctx: Context) {
                 put("PATH", "/system/bin")
             }
         }
+    }
+
+    // --------------------------------------------------------------- Flatpak
+
+    data class FlatpakApp(val id: String, val name: String, val icon: File?)
+
+    private val flatpakArch: String
+        get() = when (Build.SUPPORTED_ABIS.first()) {
+            "arm64-v8a" -> "aarch64"; "x86_64" -> "x86_64"; else -> "arm"
+        }
+    private val libTriplet: String
+        get() = when (flatpakArch) {
+            "aarch64" -> "aarch64-linux-gnu"; "x86_64" -> "x86_64-linux-gnu"; else -> "arm-linux-gnueabihf"
+        }
+
+    private fun flatpakRoot(d: Distro) = File(rootfs(d), "var/lib/flatpak")
+
+    fun flatpakInstalled(d: Distro) = File(rootfs(d), "usr/bin/flatpak").exists()
+
+    /** Installed Flatpak apps, read straight from the distro's flatpak directory. */
+    fun flatpakApps(d: Distro): List<FlatpakApp> =
+        File(flatpakRoot(d), "app").listFiles().orEmpty().filter { File(it, "current/active/files").exists() }.map { dir ->
+            val active = File(dir, "current/active")
+            val desktop = File(active, "export/share/applications/${dir.name}.desktop")
+            val name = runCatching {
+                desktop.readLines().firstOrNull { it.startsWith("Name=") }?.removePrefix("Name=")
+            }.getOrNull() ?: dir.name.substringAfterLast('.')
+            val icon = listOf("128x128", "256x256", "512x512", "64x64").map {
+                File(active, "export/share/icons/hicolor/$it/apps/${dir.name}.png")
+            }.firstOrNull { it.exists() }
+            FlatpakApp(dir.name, name, icon)
+        }.sortedBy { it.name.lowercase() }
+
+    private fun iniValue(f: File, section: String, key: String): String? {
+        var inSection = false
+        for (line in f.readLines()) {
+            val t = line.trim()
+            if (t.startsWith("[")) inSection = t == "[$section]"
+            else if (inSection && t.startsWith("$key=")) return t.removePrefix("$key=")
+        }
+        return null
+    }
+
+    /**
+     * Runs a Flatpak app without bubblewrap (which needs kernel namespaces Android doesn't
+     * allow): proot gives it the same view Flatpak would — runtime at /usr, app at /app,
+     * the runtime's GL extension — on top of the distro for /tmp (X11), /root and /dev.
+     */
+    fun flatpakAppProcess(d: Distro, appId: String, display: String): ProcessBuilder {
+        val root = rootfs(d)
+        val active = File(flatpakRoot(d), "app/$appId/current/active")
+        val metadata = File(active, "metadata")
+        if (!metadata.exists()) throw IOException("$appId is not installed")
+        val runtimeRef = iniValue(metadata, "Application", "runtime") ?: throw IOException("No runtime for $appId")
+        val command = iniValue(metadata, "Application", "command") ?: throw IOException("No command for $appId")
+        val (rtName, rtArch, rtBranch) = runtimeRef.split('/').let { Triple(it[0], it.getOrElse(1) { flatpakArch }, it.getOrElse(2) { "" }) }
+        val runtime = File(flatpakRoot(d), "runtime/$rtName/$rtArch/$rtBranch/active/files").canonicalFile
+        if (!runtime.exists()) throw IOException("Runtime $runtimeRef missing; reinstall $appId")
+        val app = File(active, "files").canonicalFile
+
+        val glLib = "/usr/lib/$libTriplet/GL/default"
+        val gl = File(flatpakRoot(d), "runtime/org.freedesktop.Platform.GL.default/$rtArch").listFiles()
+            .orEmpty().filter { !it.name.contains("extra") && File(it, "active/files").exists() }
+            .maxByOrNull { it.name }?.let { File(it, "active/files").canonicalFile }
+
+        val binds = mutableListOf("${runtime.path}:/usr", "${app.path}:/app")
+        for (dir in listOf("lib", "lib64", "bin", "sbin")) {
+            if (File(runtime, dir).exists()) binds += "${File(runtime, dir).path}:/$dir"
+        }
+        if (File(runtime, "etc").exists()) {
+            binds += "${File(runtime, "etc").path}:/etc"
+            // Keep the distro's identity/network files on top of the runtime's /etc.
+            for (f in listOf("resolv.conf", "hosts", "passwd", "group", "machine-id", "localtime")) {
+                if (File(root, "etc/$f").exists()) binds += "${File(root, "etc/$f").path}:/etc/$f"
+            }
+        }
+        if (gl != null) binds += "${gl.path}:$glLib"
+
+        val data = "/root/.var/app/$appId"
+        listOf("data", "config", "cache").forEach { File(root, "root/.var/app/$appId/$it").mkdirs() }
+        val env = listOf(
+            "HOME=/root", "USER=root", "LANG=C.UTF-8", "TERM=xterm-256color", "TMPDIR=/tmp",
+            "PATH=/app/bin:/usr/bin:/bin",
+            "LD_LIBRARY_PATH=/app/lib:$glLib/lib",
+            "LIBGL_DRIVERS_PATH=$glLib/lib/dri",
+            "__EGL_VENDOR_LIBRARY_DIRS=$glLib/share/glvnd/egl_vendor.d",
+            "LIBGL_ALWAYS_SOFTWARE=1", "GALLIUM_DRIVER=llvmpipe",
+            "DISPLAY=$display", "XDG_RUNTIME_DIR=/tmp/runtime-root",
+            "XDG_DATA_DIRS=/app/share:/usr/share", "XDG_DATA_HOME=$data/data",
+            "XDG_CONFIG_HOME=$data/config", "XDG_CACHE_HOME=$data/cache",
+            "FLATPAK_ID=$appId", "GDK_BACKEND=x11", "QT_QPA_PLATFORM=xcb", "NO_AT_BRIDGE=1", "GTK_USE_PORTAL=0",
+        )
+        return prootProcess(d, command, extraBinds = binds, baseEnv = env)
     }
 
     // ----------------------------------------------------------------- VirGL

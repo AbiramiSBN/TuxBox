@@ -8,6 +8,8 @@ PORT=5901
 export HOME=/root USER=root LOGNAME=root SHELL=/bin/bash
 export XDG_RUNTIME_DIR=/tmp/runtime-root
 export XDG_CONFIG_HOME=/root/.config
+# Flatpak apps installed from TuxBox show up in desktop menus
+export XDG_DATA_DIRS=/var/lib/flatpak/exports/share:/usr/local/share:/usr/share
 export NO_AT_BRIDGE=1
 rm -rf "$XDG_RUNTIME_DIR"; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
 log() { echo "[tuxbox] $*"; }

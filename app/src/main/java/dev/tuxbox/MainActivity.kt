@@ -73,6 +73,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
@@ -124,7 +125,7 @@ private fun defaultResolution(ctx: Context): Pair<Int, Int> {
     return w to h
 }
 
-private enum class Dialog { NONE, DISTRO, DISPLAY, GPU, RESOLUTION, ENV, LOG, COMMAND, RESET, CONTROLLER }
+private enum class Dialog { NONE, DISTRO, DISPLAY, GPU, RESOLUTION, ENV, LOG, COMMAND, RESET, CONTROLLER, STORE, APP, UPDATE }
 
 // ----------------------------------------------------------------- launcher
 
@@ -152,6 +153,29 @@ fun Launcher() {
     var extraEnv by rememberSaveable { mutableStateOf(prefs.getString("env", "")!!) }
     var command by rememberSaveable { mutableStateOf("") }
     var dialog by remember { mutableStateOf(Dialog.NONE) }
+    val flatpakJob by SessionManager.flatpakJob.collectAsStateWithLifecycle()
+    var selectedApp by remember { mutableStateOf<LinuxEnv.FlatpakApp?>(null) }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+
+    // ---- updates from GitHub Releases, checked once at start
+    var update by remember { mutableStateOf<Updater.Release?>(null) }
+    var updateChecked by remember { mutableStateOf(false) }
+    var updateProgress by remember { mutableStateOf<Float?>(null) }
+    LaunchedEffect(Unit) {
+        update = Updater.check()
+        updateChecked = true
+        if (update != null) dialog = Dialog.UPDATE
+    }
+    fun runUpdate(r: Updater.Release) {
+        if (!Updater.ensureInstallPermission(ctx)) return
+        scope.launch {
+            updateProgress = 0f
+            runCatching { Updater.download(ctx, r) { updateProgress = it } }
+                .onSuccess { Updater.install(ctx, it) }
+                .onFailure { SessionManager.log("Update download failed: ${it.message}") }
+            updateProgress = null
+        }
+    }
 
     val distro = Catalog.distro(distroId)
     val desktop = Catalog.desktop(desktopId)
@@ -162,6 +186,7 @@ fun Launcher() {
     val gpuCapable = remember { MesaDrivers.adrenoSupported() }
     val virgl = remember { env.virglAvailable() }
     val gpuInstalled = remember(distroId, revision, state) { env.gpuDriversInstalled(distro) }
+    val flatpakApps = remember(distroId, revision, state, flatpakJob) { env.flatpakApps(distro) }
     val display = DisplayMode.of(displayId)
     val gpu = GpuMode.of(gpuId).let {
         when {
@@ -282,6 +307,30 @@ fun Launcher() {
                 }
             }
 
+            // ------------------------------------------------ row: apps (Flatpak)
+            RowTitle("Apps", flatpakJob ?: when {
+                Flathub.deviceArch == null -> "Flathub has no apps for 32-bit devices"
+                !rootfsReady -> "Install a desktop first"
+                else -> "${flatpakApps.size} Flatpak apps · launch them on a running desktop"
+            })
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp), contentPadding = PaddingValues(vertical = 10.dp, horizontal = 4.dp)) {
+                item {
+                    SettingTile("🛍", "Flathub store", "Browse & install", enabled = rootfsReady && Flathub.deviceArch != null) {
+                        dialog = Dialog.STORE
+                    }
+                }
+                items(flatpakApps, key = { it.id }) { a ->
+                    AppTile(a.name, a.icon?.path, if (state is SessionState.Running) "Tap to open" else "Installed") {
+                        selectedApp = a; dialog = Dialog.APP
+                    }
+                }
+                if (flatpakApps.isNotEmpty()) item {
+                    SettingTile("⟳", "Update apps", "All Flatpaks", enabled = flatpakJob == null) {
+                        SessionManager.flatpak(ctx, distro, "update", label = "Updating Flatpak apps")
+                    }
+                }
+            }
+
             // ------------------------------------------------ row 2: log
             RowTitle("Log", when (state) {
                 SessionState.Idle -> "Idle"
@@ -315,6 +364,20 @@ fun Launcher() {
                     ) { SessionManager.installGpu(ctx, distro) }
                 }
                 item { SettingTile("🎮", "Controller", "Button map") { dialog = Dialog.CONTROLLER } }
+                item {
+                    SettingTile(
+                        "⬆", "Updates",
+                        when {
+                            updateProgress != null -> "Downloading ${((updateProgress ?: 0f) * 100).toInt()}%"
+                            update != null -> "v${update!!.version} available"
+                            !updateChecked -> "Checking…"
+                            else -> "v${Updater.currentVersion} · up to date"
+                        },
+                    ) {
+                        if (update != null) dialog = Dialog.UPDATE
+                        else scope.launch { updateChecked = false; update = Updater.check(); updateChecked = true; if (update != null) dialog = Dialog.UPDATE }
+                    }
+                }
                 item {
                     SettingTile("⚙", "Environment", if (extraEnv.isBlank()) "None" else "${extraEnv.lines().count { it.isNotBlank() }} set",
                         enabled = idle) { dialog = Dialog.ENV }
@@ -449,6 +512,56 @@ fun Launcher() {
             confirmButton = { TextButton(onClick = close) { Text("OK") } },
         )
 
+        Dialog.STORE -> StoreScreen(
+            installedIds = flatpakApps.map { it.id }.toSet(),
+            job = flatpakJob,
+            onInstall = { app -> SessionManager.flatpak(ctx, distro, "install", app.id, "Installing ${app.name}") },
+            onDismiss = close,
+        )
+
+        Dialog.APP -> selectedApp?.let { a ->
+            AlertDialog(
+                onDismissRequest = close,
+                icon = { AppIcon(a.icon?.path, Modifier.size(56.dp)) },
+                title = { Text(a.name) },
+                text = {
+                    Text(
+                        a.id + "\n\n" + if (state is SessionState.Running) "Opens on your running desktop."
+                        else "Start a desktop first, then open it from here or from the desktop's app menu.",
+                        color = TextDim,
+                    )
+                },
+                confirmButton = {
+                    TextButton(enabled = state is SessionState.Running, onClick = {
+                        SessionManager.launchFlatpak(ctx, distro, a.id); close(); openDesktop()
+                    }) { Text("Open") }
+                },
+                dismissButton = {
+                    TextButton(enabled = flatpakJob == null, onClick = {
+                        SessionManager.flatpak(ctx, distro, "remove", a.id, "Removing ${a.name}"); close()
+                    }) { Text("Uninstall", color = Color(0xFFFF6B6B)) }
+                },
+            )
+        }
+
+        Dialog.UPDATE -> update?.let { r ->
+            AlertDialog(
+                onDismissRequest = close,
+                title = { Text("TuxBox ${r.version} is available") },
+                text = {
+                    Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                        Text("You have ${Updater.currentVersion}. Your distros and desktops are kept.", color = TextDim)
+                        if (r.notes.isNotBlank()) { Spacer(Modifier.height(10.dp)); Text(r.notes.take(1500), fontSize = 13.sp) }
+                        updateProgress?.let { Spacer(Modifier.height(10.dp)); Text("Downloading… ${(it * 100).toInt()}%", color = Accent) }
+                    }
+                },
+                confirmButton = {
+                    TextButton(enabled = updateProgress == null, onClick = { runUpdate(r) }) { Text("Update") }
+                },
+                dismissButton = { TextButton(onClick = close) { Text("Later") } },
+            )
+        }
+
         Dialog.NONE -> Unit
     }
 }
@@ -495,6 +608,79 @@ private fun DesktopTile(de: Desktop, selected: Boolean, installed: Boolean, supp
             if (installed) "Installed" else if (supported) de.size else "Not available",
             color = TextDim, fontSize = 12.sp,
         )
+    }
+}
+
+@Composable
+private fun AppTile(name: String, icon: String?, subtitle: String, onClick: () -> Unit) {
+    val shape = RoundedCornerShape(14.dp)
+    Column(
+        Modifier.width(130.dp).height(130.dp).focusGlow(shape).clip(shape).background(Panel)
+            .clickable(onClick = onClick).padding(12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween,
+    ) {
+        AppIcon(icon, Modifier.size(56.dp))
+        Text(name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(subtitle, color = TextDim, fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+/** Full-screen Flathub browser: popular apps, search, install. */
+@Composable
+private fun StoreScreen(installedIds: Set<String>, job: String?, onInstall: (Flathub.StoreApp) -> Unit, onDismiss: () -> Unit) {
+    var query by rememberSaveable { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<Flathub.StoreApp>?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(query) {
+        if (query.isNotBlank()) kotlinx.coroutines.delay(400) // debounce typing
+        error = null
+        results = runCatching { if (query.isBlank()) Flathub.popular() else Flathub.search(query) }
+            .onFailure { error = "Couldn't reach Flathub: ${it.message}" }.getOrNull()
+    }
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = onDismiss,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Column(Modifier.fillMaxSize().background(Ink).safeDrawingPadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Flathub", fontSize = 26.sp, fontWeight = FontWeight.Black, color = Color.White)
+                Spacer(Modifier.width(16.dp))
+                OutlinedTextField(query, { query = it }, singleLine = true, modifier = Modifier.weight(1f),
+                    placeholder = { Text("Search apps (Firefox, GIMP, VLC, LibreOffice…)") })
+                Spacer(Modifier.width(12.dp))
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+            if (job != null) Text("⏳ $job — this runs in the background; you can close this screen.", color = Accent)
+            Text("Apps run without Flatpak's sandbox (Android doesn't allow it) and with software graphics. " +
+                "The first app downloads a shared runtime (~300–900 MB).", color = TextDim, fontSize = 12.sp)
+            error?.let { Text(it, color = Color(0xFFFF8A80)) }
+            val list = results
+            if (list == null && error == null) Text("Loading…", color = TextDim)
+            if (list != null) LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(list, key = { it.id }) { a ->
+                    val shape = RoundedCornerShape(12.dp)
+                    val ok = Flathub.runsHere(a)
+                    Row(
+                        Modifier.fillMaxWidth().focusGlow(shape).clip(shape).background(Panel).padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AppIcon(a.icon, Modifier.size(52.dp))
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(a.name, color = Color.White, fontWeight = FontWeight.Bold)
+                            Text(a.summary, color = TextDim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        when {
+                            a.id in installedIds -> Tag("Installed", Accent)
+                            !ok -> Tag("Not for this CPU")
+                            else -> OutlinedButton(onClick = { onInstall(a) }, enabled = job == null) { Text("Install", color = Color.White) }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

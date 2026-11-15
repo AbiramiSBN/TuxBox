@@ -2,8 +2,17 @@ name: Build APK
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Termux:X11 commit that patches/lorie-tuxbox.patch was made against
+  TERMUX_X11_COMMIT: c5d09202be5fe403cbd631712f567f64b3cce72e
 
 jobs:
   build:
@@ -27,7 +36,13 @@ jobs:
 
       - name: Build embedded X server (Termux:X11 lorie)
         run: |
-          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/termux/termux-x11.git third_party/termux-x11
+          git init -q third_party/termux-x11
+          cd third_party/termux-x11
+          git remote add origin https://github.com/termux/termux-x11.git
+          git fetch -q --depth 1 origin "$TERMUX_X11_COMMIT"
+          git checkout -q FETCH_HEAD
+          git submodule update -q --init --recursive --depth 1
+          cd ../..
           ./scripts/apply-lorie-patches.sh
           ./scripts/build-lorie.sh
 
@@ -35,10 +50,44 @@ jobs:
         with:
           gradle-version: wrapper
 
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.TUXBOX_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/tuxbox.keystore"
+            echo "TUXBOX_KEYSTORE=$RUNNER_TEMP/tuxbox.keystore" >> "$GITHUB_ENV"
+            echo "HAS_RELEASE_KEY=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::No TUXBOX_KEYSTORE_B64 secret; APK gets a throwaway key and won't update existing installs."
+            mkdir -p ~/.android
+            keytool -genkeypair -keystore ~/.android/debug.keystore -storepass android -keypass android \
+              -alias androiddebugkey -dname "CN=Android Debug" -keyalg RSA -validity 10000 >/dev/null 2>&1 || true
+          fi
+
       - name: Build
-        run: ./gradlew --no-daemon assembleRelease
+        env:
+          TUXBOX_KEYSTORE_PASSWORD: ${{ secrets.TUXBOX_KEYSTORE_PASSWORD }}
+          TUXBOX_KEY_ALIAS: ${{ secrets.TUXBOX_KEY_ALIAS }}
+          TUXBOX_KEY_PASSWORD: ${{ secrets.TUXBOX_KEY_PASSWORD }}
+        run: |
+          ARGS=""
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            ARGS="-PtuxboxVersionName=${GITHUB_REF_NAME#v} -PtuxboxVersionCode=$((100 + GITHUB_RUN_NUMBER))"
+          fi
+          ./gradlew --no-daemon assembleRelease $ARGS
+          cp app/build/outputs/apk/release/app-release.apk TuxBox.apk
 
       - uses: actions/upload-artifact@v5
         with:
           name: TuxBox-apk
-          path: app/build/outputs/apk/**/*.apk
+          path: TuxBox.apk
+
+      - name: Publish release (tags only)
+        # Only publish APKs signed with the real key; others couldn't update existing installs.
+        if: github.ref_type == 'tag' && env.HAS_RELEASE_KEY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" TuxBox.apk --title "TuxBox ${GITHUB_REF_NAME#v}" --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" TuxBox.apk --clobber

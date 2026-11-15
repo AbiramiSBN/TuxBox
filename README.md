@@ -30,6 +30,18 @@ The embedded X server and display come from [Termux:X11](https://github.com/term
 (GPL-3.0), so TuxBox as a whole is GPL-3.0.
 Pushing to GitHub also builds the APK in Actions (see `.github/workflows/build.yml`).
 
+## Flatpak apps
+The **Apps** row has a Flathub store: search, install and uninstall without opening Linux.
+Flatpak can download and install inside proot, but its sandbox (bubblewrap) needs kernel
+namespaces Android doesn't give apps, so TuxBox launches apps itself with proot: runtime at
+`/usr`, app at `/app`, the runtime's GL extension, software rendering. Apps open on the running
+desktop, from TuxBox or from the desktop's own app menu (`flatpak run` is redirected to TuxBox).
+
+## Updates
+TuxBox checks GitHub Releases at start-up and offers newer versions. Pushing a `vX.Y.Z` tag builds
+and publishes a release — only when the `TUXBOX_KEYSTORE_B64` secret is set, because updates must be
+signed with the same key as the installed app.
+
 ## Controls
 - Tap: left click
 - Long-press: right click
