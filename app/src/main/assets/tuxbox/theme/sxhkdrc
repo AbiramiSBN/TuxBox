@@ -1,0 +1,29 @@
+# Hyprland default keybinds (KooL dots style)
+super + {q,Return}
+	tuxbox-term
+super + {r,d}
+	rofi -show drun
+super + e
+	thunar || pcmanfm || tuxbox-term
+super + b
+	firefox || firefox-esr || chromium
+super + c
+	bspc node -c
+super + v
+	bspc node -t ~floating
+super + f
+	bspc node -t ~fullscreen
+super + m
+	bspc quit
+super + Tab
+	rofi -show window
+alt + Tab
+	bspc node -f next.local.window
+super + {_,shift + }{1-9}
+	bspc {desktop -f,node -d} '^{1-9}'
+super + {Left,Down,Up,Right}
+	bspc node -f {west,south,north,east}
+super + shift + {Left,Down,Up,Right}
+	bspc node -s {west,south,north,east}
+super + {h,j,k,l}
+	bspc node -f {west,south,north,east}

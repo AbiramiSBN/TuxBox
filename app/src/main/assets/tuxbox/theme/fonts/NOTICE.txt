@@ -1,0 +1,4 @@
+JetBrainsMono Nerd Font and FantasqueSansM Nerd Font Mono are patched by the Nerd Fonts
+project (https://www.nerdfonts.com) and licensed under the SIL Open Font License 1.1.
+JetBrains Mono: Copyright 2020 The JetBrains Mono Project Authors.
+Fantasque Sans Mono: Copyright (c) 2013-2017 Jany Belluz.

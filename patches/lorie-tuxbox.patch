@@ -1,0 +1,285 @@
+diff --git a/lorie-app/build.gradle b/lorie-app/build.gradle
+index b807268..fc5ff43 100644
+--- a/lorie-app/build.gradle
++++ b/lorie-app/build.gradle
+@@ -26,7 +26,7 @@ android {
+     compileSdkVersion 34
+     ndkVersion termuxX11NdkVersion
+     defaultConfig {
+-        applicationId "com.termux.x11"
++        applicationId "dev.tuxbox"
+         minSdkVersion 24
+         targetSdkVersion 34
+         versionCode 15
+diff --git a/lorie/build.gradle b/lorie/build.gradle
+index 9e90d4a..0943b74 100644
+--- a/lorie/build.gradle
++++ b/lorie/build.gradle
+@@ -32,6 +32,8 @@ android {
+         buildConfigField "String", "VERSION_NAME", "\"${termuxX11VersionName}\""
+         buildConfigField "String", "COMMIT", "\"" + ("git rev-parse HEAD\n".execute().getText().trim() ?: (System.getenv('CURRENT_COMMIT') ?: "NO_COMMIT")) + "\""
+         buildConfigField "String", "APPLICATION_ID", "\"${hostApplicationId}\""
++        // TuxBox: phones/TV boxes only
++        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
+ 
+         consumerProguardFiles 'proguard-rules.pro'
+     }
+diff --git a/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java b/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java
+index 6196631..7254023 100644
+--- a/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java
++++ b/lorie/src/main/java/com/termux/x11/CmdEntryPoint.java
+@@ -198,6 +198,14 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
+     private static void initEntryPoint() {
+         ctx = createContext();
+ 
++        // TuxBox: the host app extracts native libs (it needs exec-able proot), so they are
++        // not loadable from inside the APK. Load from the extracted directory when given.
++        String libDir = System.getenv("LORIE_NATIVE_LIB_DIR");
++        if (libDir != null) {
++            System.load(libDir + "/libXlorie.so");
++            return;
++        }
++
+         String path = "lib/" + (android.os.Process.is64Bit() ? Build.SUPPORTED_64_BIT_ABIS[0] : Build.SUPPORTED_32_BIT_ABIS[0]) + "/libXlorie.so";
+         ClassLoader loader = CmdEntryPoint.class.getClassLoader();
+         URL res = loader != null ? loader.getResource(path) : null;
+diff --git a/lorie/src/main/java/com/termux/x11/MainActivity.java b/lorie/src/main/java/com/termux/x11/MainActivity.java
+index e18c186..ba02391 100644
+--- a/lorie/src/main/java/com/termux/x11/MainActivity.java
++++ b/lorie/src/main/java/com/termux/x11/MainActivity.java
+@@ -933,6 +933,7 @@ public class MainActivity extends AppCompatActivity {
+         }
+ 
+         setTerminalToolbarViewLayout();
++        tuxboxUpdateKeysButton(!showNow && getLorieView().connected() && prefs.showAdditionalKbd.get() && !isInPictureInPictureMode);
+         getLorieView().requestFocus();
+     }
+ 
+@@ -950,6 +951,31 @@ public class MainActivity extends AppCompatActivity {
+     }
+ 
+     @SuppressLint("RtlHardcoded")
++    // TuxBox: small floating button that brings the hidden key bar back.
++    private android.widget.TextView tuxboxKeysButton;
++
++    private void tuxboxUpdateKeysButton(boolean show) {
++        if (tuxboxKeysButton == null) {
++            float d = getResources().getDisplayMetrics().density;
++            tuxboxKeysButton = new android.widget.TextView(this);
++            tuxboxKeysButton.setText("\u2328 \u25B4");
++            tuxboxKeysButton.setTextColor(0xFFFFFFFF);
++            tuxboxKeysButton.setTextSize(14);
++            tuxboxKeysButton.setPadding((int) (14 * d), (int) (6 * d), (int) (14 * d), (int) (6 * d));
++            android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
++            bg.setColor(0x99202020);
++            bg.setCornerRadius(18 * d);
++            tuxboxKeysButton.setBackground(bg);
++            tuxboxKeysButton.setOnClickListener(v -> toggleExtraKeys(true, true));
++            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
++                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.END);
++            lp.setMargins(0, 0, (int) (10 * d), (int) (10 * d));
++            ((ViewGroup) findViewById(android.R.id.content)).addView(tuxboxKeysButton, lp);
++        }
++        tuxboxKeysButton.setVisibility(show ? View.VISIBLE : View.GONE);
++        if (show) tuxboxKeysButton.bringToFront();
++    }
++
+     private void setTerminalToolbarViewLayout() {
+         handler.post(() -> {
+             final ViewPager pager = getTerminalToolbarViewPager();
+@@ -1039,6 +1065,21 @@ public class MainActivity extends AppCompatActivity {
+         toggleExtraKeys(getTerminalToolbarViewPager().getVisibility() != View.VISIBLE, true);
+     }
+ 
++    // TuxBox: controller as mouse/keyboard
++    private final com.termux.x11.input.GamepadMouse tuxboxGamepad = new com.termux.x11.input.GamepadMouse(this);
++
++    @Override
++    public boolean dispatchGenericMotionEvent(MotionEvent ev) {
++        if (tuxboxGamepad.onMotion(ev)) return true;
++        return super.dispatchGenericMotionEvent(ev);
++    }
++
++    @Override
++    public boolean dispatchKeyEvent(KeyEvent ev) {
++        if (tuxboxGamepad.onKey(ev)) return true;
++        return super.dispatchKeyEvent(ev);
++    }
++
+     public boolean handleKey(KeyEvent e) {
+         if (filterOutWinKey && (e.getKeyCode() == KEYCODE_META_LEFT || e.getKeyCode() == KEYCODE_META_RIGHT || e.isMetaPressed()))
+             return false;
+diff --git a/lorie/src/main/java/com/termux/x11/extrakeys/ExtraKeysConstants.java b/lorie/src/main/java/com/termux/x11/extrakeys/ExtraKeysConstants.java
+index c982fcc..3c152f9 100644
+--- a/lorie/src/main/java/com/termux/x11/extrakeys/ExtraKeysConstants.java
++++ b/lorie/src/main/java/com/termux/x11/extrakeys/ExtraKeysConstants.java
+@@ -89,6 +89,7 @@ public class ExtraKeysConstants {
+             put("PASTE", "⎘"); // U+2398
+             put("SCROLL", "⇳"); // U+21F3
+             put("PREFERENCES", "⚙"); // U+2699 GEAR not well known but easy to understand
++            put("HIDE", "▾"); // TuxBox: hide this key bar
+             put("EXIT", "╳"); // U+2573 BOX DRAWINGS LIGHT DIAGONAL CROSS not well known but easy to understand
+             put("MOUSE_HELPER", "\uD83D\uDDB1"); // U+1F5B1 THREE BUTTON MOUSE
+             put("STYLUS_HELPER", "\uD83D\uDD8C"); // U+1F58C LOWER LEFT PAINTBRUSH
+diff --git a/lorie/src/main/java/com/termux/x11/input/GamepadMouse.java b/lorie/src/main/java/com/termux/x11/input/GamepadMouse.java
+new file mode 100644
+index 0000000..5b3f716
+--- /dev/null
++++ b/lorie/src/main/java/com/termux/x11/input/GamepadMouse.java
+@@ -0,0 +1,134 @@
++package com.termux.x11.input;
++
++import android.os.Handler;
++import android.os.Looper;
++import android.view.InputDevice;
++import android.view.KeyEvent;
++import android.view.MotionEvent;
++
++import com.termux.x11.LorieView;
++import com.termux.x11.MainActivity;
++
++/**
++ * TuxBox addition: use a game controller as mouse + keyboard on the X desktop.
++ *
++ *  Left stick: mouse (relative)   Right stick: scroll   D-pad: arrow keys
++ *  A: left click (hold to drag)   B: right click        L3: middle click
++ *  X: Enter   Y: Backspace   Select: Esc   Start: on-screen keyboard
++ *  L1: Super (hold)   R1: Alt (hold)   L2: Ctrl (hold)   R2: Tab   R3: extra keys bar
++ */
++public class GamepadMouse {
++    private final MainActivity activity;
++    private final Handler handler = new Handler(Looper.getMainLooper());
++    private float lx, ly, rx, ry, scrollAccX, scrollAccY;
++    private int hatX, hatY;
++    private boolean l2, r2, ticking;
++
++    public GamepadMouse(MainActivity activity) { this.activity = activity; }
++
++    private LorieView view() { return activity.getLorieView(); }
++
++    private static float dead(float v) { return Math.abs(v) < 0.15f ? 0f : v; }
++
++    /** Returns true if the event was a controller event and has been consumed. */
++    public boolean onMotion(MotionEvent e) {
++        if (!e.isFromSource(InputDevice.SOURCE_JOYSTICK) || e.getActionMasked() != MotionEvent.ACTION_MOVE)
++            return false;
++        lx = dead(e.getAxisValue(MotionEvent.AXIS_X));
++        ly = dead(e.getAxisValue(MotionEvent.AXIS_Y));
++        rx = dead(e.getAxisValue(MotionEvent.AXIS_Z));
++        ry = dead(e.getAxisValue(MotionEvent.AXIS_RZ));
++
++        int hx = axisToDir(e.getAxisValue(MotionEvent.AXIS_HAT_X));
++        int hy = axisToDir(e.getAxisValue(MotionEvent.AXIS_HAT_Y));
++        if (hx != hatX) {
++            if (hatX != 0) key(hatX < 0 ? KeyEvent.KEYCODE_DPAD_LEFT : KeyEvent.KEYCODE_DPAD_RIGHT, false);
++            if (hx != 0) key(hx < 0 ? KeyEvent.KEYCODE_DPAD_LEFT : KeyEvent.KEYCODE_DPAD_RIGHT, true);
++            hatX = hx;
++        }
++        if (hy != hatY) {
++            if (hatY != 0) key(hatY < 0 ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN, false);
++            if (hy != 0) key(hy < 0 ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN, true);
++            hatY = hy;
++        }
++
++        boolean lt = Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE)) > 0.5f;
++        boolean rt = Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS)) > 0.5f;
++        if (lt != l2) button(KeyEvent.KEYCODE_BUTTON_L2, lt);
++        if (rt != r2) button(KeyEvent.KEYCODE_BUTTON_R2, rt);
++
++        if (!ticking && (lx != 0 || ly != 0 || rx != 0 || ry != 0)) {
++            ticking = true;
++            handler.post(tick);
++        }
++        return true;
++    }
++
++    private static int axisToDir(float v) { return v > 0.5f ? 1 : (v < -0.5f ? -1 : 0); }
++
++    private final Runnable tick = new Runnable() {
++        @Override public void run() {
++            if (lx == 0 && ly == 0 && rx == 0 && ry == 0) { ticking = false; return; }
++            LorieView v = view();
++            if (v != null && v.connected()) {
++                if (lx != 0 || ly != 0) {
++                    float speed = 22f * activity.getResources().getDisplayMetrics().density / 2f;
++                    v.sendMouseEvent(lx * Math.abs(lx) * speed, ly * Math.abs(ly) * speed, InputStub.BUTTON_UNDEFINED, false, true);
++                }
++                scrollAccX += rx * 0.3f;
++                scrollAccY += ry * 0.3f;
++                if (Math.abs(scrollAccX) >= 1f || Math.abs(scrollAccY) >= 1f) {
++                    int sx = (int) scrollAccX, sy = (int) scrollAccY;
++                    v.sendMouseWheelEvent(sx * 100f, sy * 100f);
++                    scrollAccX -= sx; scrollAccY -= sy;
++                }
++            }
++            handler.postDelayed(this, 16);
++        }
++    };
++
++    /** Returns true if the key event came from a controller button and has been consumed. */
++    public boolean onKey(KeyEvent e) {
++        int code = e.getKeyCode();
++        boolean padButton = KeyEvent.isGamepadButton(code);
++        boolean padDpad = e.isFromSource(InputDevice.SOURCE_GAMEPAD) && code >= KeyEvent.KEYCODE_DPAD_UP && code <= KeyEvent.KEYCODE_DPAD_CENTER;
++        if (!padButton && !padDpad) return false;
++        if (e.getAction() == KeyEvent.ACTION_MULTIPLE) return true;
++        boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
++        if (padDpad) {
++            if (e.getRepeatCount() == 0)
++                key(code == KeyEvent.KEYCODE_DPAD_CENTER ? KeyEvent.KEYCODE_ENTER : code, down);
++            return true;
++        }
++        if (e.getRepeatCount() == 0) button(code, down);
++        return true;
++    }
++
++    private void mouse(int b, boolean down) {
++        LorieView v = view();
++        if (v != null && v.connected()) v.sendMouseEvent(0, 0, b, down, true);
++    }
++
++    private void key(int keyCode, boolean down) {
++        LorieView v = view();
++        if (v != null && v.connected()) v.sendKeyEvent(0, keyCode, down);
++    }
++
++    private void button(int code, boolean down) {
++        switch (code) {
++            case KeyEvent.KEYCODE_BUTTON_A: mouse(InputStub.BUTTON_LEFT, down); break;
++            case KeyEvent.KEYCODE_BUTTON_B: mouse(InputStub.BUTTON_RIGHT, down); break;
++            case KeyEvent.KEYCODE_BUTTON_THUMBL: mouse(InputStub.BUTTON_MIDDLE, down); break;
++            case KeyEvent.KEYCODE_BUTTON_X: key(KeyEvent.KEYCODE_ENTER, down); break;
++            case KeyEvent.KEYCODE_BUTTON_Y: key(KeyEvent.KEYCODE_DEL, down); break;
++            case KeyEvent.KEYCODE_BUTTON_SELECT: key(KeyEvent.KEYCODE_ESCAPE, down); break;
++            case KeyEvent.KEYCODE_BUTTON_START: if (down) activity.toggleKeyboardVisibility(); break;
++            case KeyEvent.KEYCODE_BUTTON_L1: key(KeyEvent.KEYCODE_META_LEFT, down); break;
++            case KeyEvent.KEYCODE_BUTTON_R1: key(KeyEvent.KEYCODE_ALT_LEFT, down); break;
++            case KeyEvent.KEYCODE_BUTTON_L2: if (down != l2) { l2 = down; key(KeyEvent.KEYCODE_CTRL_LEFT, down); } break;
++            case KeyEvent.KEYCODE_BUTTON_R2: if (down != r2) { r2 = down; key(KeyEvent.KEYCODE_TAB, down); } break;
++            case KeyEvent.KEYCODE_BUTTON_THUMBR: if (down) activity.toggleExtraKeys(); break;
++            default: break;
++        }
++    }
++}
+diff --git a/lorie/src/main/java/com/termux/x11/utils/TermuxX11ExtraKeys.java b/lorie/src/main/java/com/termux/x11/utils/TermuxX11ExtraKeys.java
+index 37bdd5c..d2e1142 100644
+--- a/lorie/src/main/java/com/termux/x11/utils/TermuxX11ExtraKeys.java
++++ b/lorie/src/main/java/com/termux/x11/utils/TermuxX11ExtraKeys.java
+@@ -39,7 +39,7 @@ public class TermuxX11ExtraKeys implements ExtraKeysView.IExtraKeysView {
+     private boolean metaDown;
+ 
+     /** Defines the key for extra keys */
+-    public static final String DEFAULT_IVALUE_EXTRA_KEYS = "[['ESC','/',{key: '-', popup: '|'},'HOME','UP',{key: 'END', popup: 'ZOOM_IN'},{key: 'PGUP', popup: 'ZOOM_OUT'},{key: 'KEYBOARD', popup: 'ZOOM_RESET'}], ['TAB','CTRL','ALT','LEFT','DOWN','RIGHT','PGDN','PREFERENCES']]"; // Double row
++    public static final String DEFAULT_IVALUE_EXTRA_KEYS = "[['ESC','/',{key: '-', popup: '|'},'HOME','UP',{key: 'END', popup: 'ZOOM_IN'},{key: 'PGUP', popup: 'ZOOM_OUT'},{key: 'KEYBOARD', popup: 'ZOOM_RESET'}], ['TAB','CTRL','ALT','LEFT','DOWN','RIGHT','PGDN','PREFERENCES','HIDE']]"; // Double row
+ 
+     public TermuxX11ExtraKeys(@NonNull View.OnKeyListener eventlistener, MainActivity activity, ExtraKeysView extrakeysview) {
+         mEventListener = eventlistener;
+@@ -197,6 +197,8 @@ public class TermuxX11ExtraKeys implements ExtraKeysView.IExtraKeysView {
+             mActivity.startActivity(new Intent(mActivity, LoriePreferences.class) {{ setAction(ACTION_START_PREFERENCES_ACTIVITY); }});
+         else if ("EXIT".equals(key))
+             mActivity.finish();
++        else if ("HIDE".equals(key))
++            mActivity.toggleExtraKeys(false, true);
+         else if ("PASTE".equals(key)) {
+             ClipData clipData = mClipboardManager.getPrimaryClip();
+             if (clipData != null) {

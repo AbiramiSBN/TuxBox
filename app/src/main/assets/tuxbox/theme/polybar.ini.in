@@ -1,0 +1,139 @@
+; TuxBox Hypr-style bar: recreation of the Waybar "Simple-White" + nwg-dock look.
+; Generated sizes (@X@) are filled in by apply.sh for the current screen.
+[colors]
+bg = #E0FFFFFF
+fg = #1f2329
+dim = #8a8f98
+accent = #1f2329
+border = #14000000
+urgent = #e5484d
+
+[settings]
+screenchange-reload = true
+pseudo-transparency = false
+
+[bar/base]
+height = @BAR_H@
+radius = @RADIUS@
+background = ${colors.bg}
+foreground = ${colors.fg}
+border-size = 0
+dpi = @DPI@
+font-0 = "JetBrainsMono Nerd Font:style=Bold:size=10;@FOFF@"
+font-1 = "JetBrainsMono Nerd Font:size=12;@IOFF@"
+padding-left = 1
+padding-right = 1
+module-margin = 1
+offset-y = @M@
+wm-restack = bspwm
+override-redirect = false
+fixed-center = true
+cursor-click = pointer
+
+[bar/left]
+inherit = bar/base
+width = @LW@
+offset-x = @SIDE@
+modules-left = apps xworkspaces
+
+[bar/center]
+inherit = bar/base
+width = @CW@
+offset-x = @CX@
+modules-center = clock
+
+[bar/right]
+inherit = bar/base
+width = @RW@
+offset-x = @RX@
+modules-right = tray memory notify power
+
+[bar/dock]
+inherit = bar/base
+bottom = true
+height = @DOCK_H@
+width = @DW@
+offset-x = @DX@
+font-0 = "JetBrainsMono Nerd Font:size=17;@DOFF@"
+modules-center = d-apps d-files d-term d-web d-win
+module-margin = 0
+padding-left = @DSIDE@px
+padding-right = @DSIDE@px
+
+[module/apps]
+type = custom/text
+format = "󰀻 Apps"
+format-padding = 1
+click-left = rofi -show drun
+
+[module/xworkspaces]
+type = internal/xworkspaces
+label-active = %icon%
+label-active-font = 2
+icon-0 = 1;󰲠
+icon-1 = 2;󰲢
+icon-2 = 3;󰲤
+icon-3 = 4;󰲦
+icon-4 = 5;󰲨
+label-occupied = " %name% "
+label-empty = " %name% "
+label-empty-foreground = ${colors.dim}
+label-urgent = " %name% "
+label-urgent-foreground = ${colors.urgent}
+
+[module/clock]
+type = internal/date
+interval = 5
+date = %I:%M %p
+label = %date%
+
+[module/tray]
+type = internal/tray
+tray-size = 70%
+tray-spacing = 6
+
+[module/memory]
+type = internal/memory
+interval = 5
+label = "󰍛 %percentage_used%%"
+
+[module/notify]
+type = custom/text
+format = "󰂚"
+click-left = dunstctl history-pop
+
+[module/power]
+type = custom/text
+format = "󰐥"
+format-padding = 1
+click-left = bspc quit
+
+[module/d-apps]
+type = custom/text
+format-padding = @DPAD@px
+format = "󰀻"
+click-left = rofi -show drun
+
+[module/d-files]
+type = custom/text
+format-padding = @DPAD@px
+format = ""
+click-left = thunar || pcmanfm || tuxbox-term
+
+[module/d-term]
+type = custom/text
+format-padding = @DPAD@px
+format = ""
+click-left = tuxbox-term
+
+[module/d-web]
+type = custom/text
+format-padding = @DPAD@px
+format = "󰈹"
+click-left = sh -c 'firefox || firefox-esr || chromium || tuxbox-term -e sh -c "echo No browser installed; sleep 3"'
+
+[module/d-win]
+type = custom/text
+format-padding = @DPAD@px
+format = "󰕮"
+click-left = rofi -show window

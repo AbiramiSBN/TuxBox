@@ -1,0 +1,24 @@
+#!/bin/sh
+# TuxBox Hypr-style: bspwm laid out like Hyprland (gaps_in 4, gaps_out 6, 1px borders)
+pgrep -x sxhkd >/dev/null || sxhkd &
+bspc monitor -d 1 2 3 4 5
+bspc config border_width          1
+bspc config window_gap            @GAP@
+bspc config top_padding           @TOP@
+bspc config bottom_padding        @BOT@
+bspc config split_ratio           0.5
+bspc config borderless_monocle    true
+bspc config focus_follows_pointer false
+bspc config focused_border_color  "#807D7C"
+bspc config normal_border_color   "#3A3432"
+bspc config active_border_color   "#3A3432"
+bspc rule -a Rofi state=floating
+bspc rule -a Pavucontrol state=floating
+xrdb -merge ~/.Xresources
+xsetroot -cursor_name left_ptr
+feh --no-fehbg --bg-fill ~/.config/tuxbox/wallpaper.jpg
+pgrep -x picom >/dev/null || picom -b --config ~/.config/picom/picom.conf --backend @BACKEND@ || picom -b --config ~/.config/picom/picom.conf --backend xrender
+pgrep -x dunst >/dev/null || dunst &
+pkill -x polybar; sleep 0.2
+for b in left center right dock; do polybar -q "$b" & done
+pgrep -f tuxbox-resize-watch >/dev/null || tuxbox-resize-watch &

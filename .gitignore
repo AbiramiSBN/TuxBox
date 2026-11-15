@@ -1,0 +1,11 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+app/src/main/jniLibs/
+.proot-work/
+third_party/
+app/libs/
+*.apk
+.kotlin/
